@@ -1,9 +1,38 @@
 # Configuration for mapping Tableau TWB XML elements to Power BI TMDL/Report objects
 
+# --- Output Settings ---
+Output:
+  intermediate_dir: extracted  # Directory for storing intermediate JSON files
+  validate_intermediate: false     # Whether to validate intermediate files
+
+# --- API Settings ---
+api_settings:
+  # Base URL for the FastAPI service
+  base_url: "http://localhost:8000"
+  # Timeout in seconds for API requests
+  timeout_seconds: 30
+  # Endpoints
+  endpoints:
+    tableau_to_dax: "/convert/tableau-to-dax"
+    tableau_to_m: "/convert/tableau-to-m-code"
+    # Add more endpoints as needed
+
 # --- Template Mappings ---
 Templates:
   base_dir: templates
   mappings:
+    # --- Project Files ---
+    version:
+      template: Version.txt
+      output: Version.txt
+      config: PowerBiVersion
+      dataclass: PowerBiVersion
+
+    pbixproj:
+      template: pbixproj.json
+      output: .pbixproj.json
+      config: PowerBiProject
+      dataclass: PowerBiProject
     # --- Model Files ---
     model:
       template: model.tmdl
@@ -22,20 +51,20 @@ Templates:
       dataclass: PowerBiExpressions
     table:
       template: Table.tmdl
-      output: Model/tables/{{name}}.tmdl
+      output: Model/tables/{{source_name}}.tmdl
       config: PowerBiTable
       dataclass: PowerBiTable
       multiple: true
-      name_from: name
+      name_from: source_name
     relationship:
       template: relationship.tmdl
-      output: Model/relationships/{{id}}.tmdl
+      output: Model/relationships.tmdl
       config: PowerBiRelationship
       dataclass: PowerBiRelationship
       multiple: true
       name_from: id
     culture:
-      template: en-US.tmdl
+      template: culture.tmdl
       output: Model/cultures/{{culture}}.tmdl
       config: PowerBiCulture
       dataclass: CultureInfo
@@ -76,18 +105,6 @@ Templates:
       multiple: true
       name_from: name
 
-    # --- Project Files ---
-    project:
-      template: pbixproj.json
-      output: .pbixproj.json
-      config: PowerBiProject
-      dataclass: PowerBiProject
-    version:
-      template: version.txt
-      output: Version.txt
-      config: PowerBiVersion
-      dataclass: PowerBiVersion
-
 # --- Model Settings ---
 PowerBiModel:
   source_xpath: //workbook
@@ -112,29 +129,111 @@ PowerBiModel:
 
 # --- Table Settings ---
 PowerBiTable:
-  source_xpath: //relation[@type="table"]
-  name:
-    source_xpath: ./@name
-    format: identifier  # Will be sanitized for PBI
-  columns:
-    source_xpath: .//column
-    mapping:
-      name:
-        source_xpath: ./@name
-        format: identifier
-      datatype:
-        source_xpath: ./@datatype
-        mapping: tableau_datatype_to_tmdl
-      format_string:
-        source_xpath: ./@format
-        optional: true
-      description:
-        source_xpath: ./@description
-        optional: true
-      is_hidden:
-        source_xpath: ./@hidden
-        format: boolean
-        default: false
+  # Target datasource elements that have actual connections
+  source_xpath: |
+    //datasources/datasource[
+      @inline='true' and
+      not(@name='Parameters') and
+      not(@hasconnection='false') and
+      .//connection[@class and @class!='tableau']
+    ]
+  source_name:
+    # 'caption' is often the user-friendly name
+    source_attribute: caption
+    fallback_attribute: name # Fallback to internal name if caption is missing
+  description:
+    source_attribute: caption
+    default: null
+  is_hidden:
+    source_attribute: hidden
+    default: false
+
+  # Connection configuration
+  connection_config:
+    # Primary connection types
+    primary_xpath: "connection[@class!='tableau']"
+    named_connection_xpath: "connection/named-connections/named-connection/connection"
+    # Connection class mapping
+    class_mapping:
+      federated: "named-connection"
+      dremio: "dremio"
+      oracle: "oracle"
+      sqlserver: "sqlserver"
+      excel: "excel-direct"
+
+  # Relation configuration to find actual tables within datasources
+  relation_config:
+    # Find relations within connections in datasources, handling both legacy and new formats
+    source_xpath: |
+      connection/relation[@type='table' or @type='text'] |
+      connection/_.fcp.ObjectModelEncapsulateLegacy.false...relation[@type='table' or @type='text' or @type='join'] |
+      relation[@type='table' or @type='text']
+    table_name:
+      source_attribute: name
+      optional: true
+    table_type:
+      source_attribute: type
+      optional: true
+    connection_id:
+      source_xpath: "../@name"
+      optional: true
+    sql_query:
+      # For text type relations that contain SQL queries
+      source_xpath: "text()"
+      optional: true
+    # Handle join relations
+    join_config:
+      source_xpath: "clause[@type='join']/expression[@op='=']"
+      left_table_xpath: "expression[1]/text()"
+      right_table_xpath: "expression[2]/text()"
+
+  # Columns configuration
+  columns_config:
+    # Target metadata-records for logical columns
+    source_xpath: ".//metadata-records/metadata-record[@class='column']"
+    # Target standalone calculated fields directly under datasource
+    calculated_fields_xpath: "column[calculation]"
+    # Additional XPaths for finding columns in relation elements
+    relation_column_paths:
+      - ".//_.fcp.ObjectModelEncapsulateLegacy.false...relation//column"
+      - ".//_.fcp.ObjectModelEncapsulateLegacy.true...relation//column"
+      - ".//relation//column"
+    # Attribute mappings for relation columns
+    relation_column_mappings:
+      name_attribute: "name"
+      datatype_attribute: "datatype"
+      ordinal_attribute: "ordinal"
+    # Attribute mappings for calculated fields
+    calculated_field_mappings:
+      name_attribute: "caption"
+      datatype_attribute: "datatype"
+      description_attribute: "caption"
+    name:
+      source_attribute: caption
+      fallback_attribute: local-name
+      format: identifier
+    datatype:
+      source_attribute: local-type
+      mapping: tableau_datatype_to_tmdl
+    format_string:
+      source_attribute: format
+      optional: true
+    summarize_by:
+      source_xpath: "aggregation/text()"
+      optional: true
+    description:
+      source_attribute: caption
+      optional: true
+    is_hidden:
+      source_attribute: hidden
+      format: boolean
+      default: false
+    role:
+      source_attribute: role
+      optional: true
+    calculation_formula:
+      source_xpath: "calculation/@formula"
+      optional: true
 
 # --- Culture Settings ---
 PowerBiCulture:
@@ -145,16 +244,18 @@ PowerBiCulture:
     default: en-US
   entities:
     tables:
-      source_xpath: .//relation[@type="table"]
-      name_attribute: name
+      source_xpath: .//relation[@type="table"] | .//metadata-record[@class="column"]/../../..
+      name_attribute: caption
+      fallback_attribute: name
       binding_template:
         State: Generated
         Terms:
           - State: Generated
     columns:
-      source_xpath: .//relation[@type="table"]//column
-      name_attribute: name
-      parent_ref: ../../@name  # How to find parent table name
+      source_xpath: .//relation[@type="table"]//column | .//metadata-record[@class="column"]
+      name_attribute: local-name
+      fallback_attribute: remote-name
+      parent_ref: parent-name  # How to find parent table name
       binding_template:
         State: Generated
         Hidden: true
@@ -163,30 +264,37 @@ PowerBiCulture:
 
 # --- Relationship Settings ---
 PowerBiRelationship:
-  source_xpath: //relation[@type="join"]
-  mapping:
-    from_table:
-      source_xpath: ./connection/relation[1]/@name
-      format: identifier
-    to_table:
-      source_xpath: ./connection/relation[2]/@name
-      format: identifier
-    from_column:
-      source_xpath: ./connection/relation[1]/@key
-      format: identifier
-    to_column:
-      source_xpath: ./connection/relation[2]/@key
-      format: identifier
-    cardinality:
-      source_xpath: ./@cardinality
-      default: many_to_one
-    cross_filter_behavior:
-      source_xpath: ./@crossfilter
-      default: both
-    is_active:
-      source_xpath: ./@active
-      format: boolean
-      default: true
+  # Maps from <relation type='join'> elements, including both legacy and non-legacy formats
+  source_xpath: //datasources/datasource/_.fcp.ObjectModelEncapsulateLegacy.false...relation[@type='join'] | //datasources/datasource/_.fcp.ObjectModelEncapsulateLegacy.true...relation[@type='join'] | //datasources/datasource/relation[@type='join']
+  context_note: "Requires parsing join clause expressions."
+  from_table:
+    # Extract from join clause expressions
+    source_xpath: .//clause[@type='join']/expression[@op='=']/expression[1]/@op
+    transformation: extract_table_name
+    format: identifier
+  to_table:
+    source_xpath: .//clause[@type='join']/expression[@op='=']/expression[2]/@op
+    transformation: extract_table_name
+    format: identifier
+  from_column:
+    source_xpath: .//clause[@type='join']/expression[@op='=']/expression[1]/@op
+    transformation: extract_column_name
+    format: identifier
+  to_column:
+    source_xpath: .//clause[@type='join']/expression[@op='=']/expression[2]/@op
+    transformation: extract_column_name
+    format: identifier
+  is_active:
+    source_xpath: ./@active
+    format: boolean
+    default: true
+  cardinality:
+    source_xpath: ./@join
+    transformation: map_join_to_cardinality
+    default: manyToOne
+  cross_filter_behavior:
+    source_xpath: ./@crossfilter
+    default: oneWay # Power BI 'Single direction'
 
 # --- Type Mappings ---
 tableau_datatype_to_tmdl:
@@ -194,51 +302,7 @@ tableau_datatype_to_tmdl:
   integer: int64
   real: double
   datetime: dateTime
-  date: date
   boolean: boolean
-  array: string
-  bstr: string
-  byref: string
-  bytes: string
-  cy: string
-  empty: string
-  error: string
-  guid: string
-  hchapter: string
-  idispatch: string
-  iunknown: string
-  null: string
-  propvariant: string
-  reserved: string
-  str: string
-  udt: string
-    time_intelligence:
-      source_xpath: .//column[@role="dimension"][@datatype="date"]
-      mapping_rule: has_elements  # If any elements found, set to "1", else "0"
-  version:
-    source_xpath: .//preferences/preference[@name="version"]
-    source_attribute: value
-    default: "2.120.7013.10 (Main)"
-  query_order:
-    source_xpath: //relation[@type="join"]
-    table_refs:
-      - ./connection/relation[@name]  # Left table
-      - ./connection/relation[@name]  # Right table
-    fallback: table_list  # If no joins found, use alphabetical list of tables
-
-# --- Metadata & Lookups ---
-# These provide reusable mappings for specific transformations
-
-tableau_datatype_to_tmdl:
-  string: string
-  integer: int64
-  real: double
-  datetime: dateTime
-  date: date
-  boolean: boolean
-  # Add others as needed, potentially default to 'string'
-
-  # Start - Added by Madhu on 05/06/2025
   array: string
   bstr: string
   byref: string
@@ -264,10 +328,8 @@ tableau_datatype_to_tmdl:
   wdc_geometry: string
   wdc_string: string
   wstr: string
-
   bool: boolean
   wdc_bool: boolean
-
   date: datetime
   dbdate: datetime
   dbtime: datetime
@@ -275,20 +337,35 @@ tableau_datatype_to_tmdl:
   filetime: datetime
   wdc_date: datetime
   wdc_datetime: datetime
-
   decimal: decimal
   numeric: decimal
   varnumeric: decimal
   r4: decimal
   r8: decimal
   wdc_float: decimal
-
   i1: int64
   i2: int64
   i4: int64
   i8: int64
-  wdc_int: int64  
-  # End - Added by Madhu on 05/06/2025
+  wdc_int: int64
+  time_intelligence:
+    source_xpath: .//column[@role="dimension"][@datatype="date"]
+    mapping_rule: has_elements  # If any elements found, set to "1", else "0"
+  version:
+    source_xpath: .//preferences/preference[@name="version"]
+    source_attribute: value
+    default: "2.120.7013.10 (Main)"
+  query_order:
+    source_xpath: //relation[@type="join"]
+    table_refs:
+      - ./connection/relation[@name]  # Left table
+      - ./connection/relation[@name]  # Right table
+    fallback: table_list  # If no joins found, use alphabetical list of tables
+
+
+# --- Metadata & Lookups ---
+# These provide reusable mappings for specific transformations
+
 
 tableau_role_to_summarize_by:
   # If role is 'measure' and datatype is numeric, default summarizeBy could be 'sum'
@@ -322,22 +399,12 @@ tableau_viz_type_to_pbi:
 
 # --- Mapping Definitions for Dataclasses ---
 
-PowerBiTable:
-  source_xpath: //datasources/datasource/relation[@name and (@type='table' or @type='text')] # Finds tables and custom SQL relations
-  pbi_name:
-    source_attribute: name
-    mapping_function: sanitize_identifier # Python function to clean name for PBI
-  source_name:
-    source_attribute: name # Keep original for lineage
-  description:
-    source_attribute: caption # Or use datasource caption if relation lacks one
-    default: null
-  is_hidden:
-    default: false # Can be overridden by post-processing logic if needed
-  partitions: # Not a direct mapping - signals generation needed
-    derived_rule: generate_m_partition # Requires connection info + relation details
-    connection_info_xpath: ../connection # Relative to relation element
-    relation_details: self # Use the current relation node
+PowerBiDatabase:
+  source_xpath: //workbook
+  name:
+    source_xpath: .//datasources/datasource/@caption
+    alternative_xpath: .//datasources/datasource/@name
+    default: Model
 
 PowerBiColumn:
   # Find columns defined within datasources OR referenced within worksheets/shelves if not in DS metadata
@@ -423,30 +490,6 @@ PowerBiMeasure:
     PBI_FormatHint:
       derived_rule: derive_pbi_format_hint
 
-PowerBiRelationship:
-  # Maps from <relation type='join'> elements
-  source_xpath: //datasources/datasource/relation[@type='join']
-  context_note: "Requires parsing join clause expressions."
-  from_table:
-    mapping_function: get_join_table_name # Parses join clause to find table name on one side
-    transformation: sanitize_identifier
-  from_column:
-    mapping_function: get_join_column_name # Parses join clause expression for field name
-    transformation: sanitize_identifier # Must match sanitized column name
-  to_table:
-    mapping_function: get_join_table_name # Parses join clause for the other table name
-    transformation: sanitize_identifier
-  to_column:
-    mapping_function: get_join_column_name # Parses join clause for the other field name
-    transformation: sanitize_identifier
-  is_active:
-    default: true
-  cardinality:
-    derived_rule: infer_cardinality # Attempt analysis, or default
-    default: manyToOne
-  cross_filter_behavior:
-    default: oneWay # Power BI 'Single direction'
-
 PowerBiHierarchy:
   # Find columns that are part of a hierarchy
   source_xpath: //datasources/datasource/column[@hierarchy]
@@ -458,10 +501,196 @@ PowerBiHierarchy:
     level_column_attribute: name # Reference the column itself
 
 PowerBiPartition: # Definition within PowerBiTable mapping applies
+  m_code_generation:
+    api:
+      base_url: "http://localhost:8000"
+      timeout_seconds: 30
+      endpoints:
+        m_code: "/convert/tableau-to-m-code"
+    
+    connection_types:
+      federated:
+        xpath:
+          named_connection: ".//named-connection"
+          connection: ".//connection"
+        fallback_template: |
+          let
+              Source = Sql.Database("{server}", "{database}"),
+              Query = "{sql_query}",
+              Output = Value.NativeQuery(Source, Query)
+          in
+              Output
+      
+      dremio:
+        fallback_template: |
+          let
+              Source = Odbc.DataSource("DREMIO"),
+              Query = "{sql_query}",
+              Output = Value.NativeQuery(Source, Query)
+          in
+              Output
+      
+      oracle:
+        fallback_template: |
+          let
+              Source = Oracle.Database("{server}", "{database}"),
+              Query = "{sql_query}",
+              Output = Value.NativeQuery(Source, Query)
+          in
+              Output
+
+      excel-direct:
+        xpath:
+          connection: ".//connection[@class='excel-direct']"
+        fallback_template: |
+          let
+              Source = Excel.Workbook(File.Contents("{filename}"), null, true),
+              {table}_Table = Source{[Item="{table}", Kind="Sheet"]},
+              #"Promoted Headers" = Table.PromoteHeaders({table}_Table, [PromoteAllScalars=true])
+          in
+              #"Promoted Headers"
+    
+    connection_info_mapping:
+      standard_fields:
+        server: "server"
+        database: "dbname"
+        schema: "schema"
+        table: ["table", "name"]
+        sql_query: "text()"
+      
+      computed_fields:
+        sql_query:
+          condition: "relation_node.text is not None and relation_node.get('type') == 'text'"
+          value: "relation_node.text.strip()"
+    
+    formatting:
+      html_unescape:
+        enabled: true
+        entities:
+          - {"&#13;": "\n"}
+          - {"&apos;": "'"}
+      indentation:
+        base: 1
+    
+    error_handling:
+      log_errors: true
+      fallback_strategy: "template"
+      fallback_conditions:
+        dremio: ["class_type == 'dremio' or 'dremio' in conn_info['additional_properties'].get('class', '')"]
+        oracle: ["class_type == 'oracle' or 'oracle' in conn_info['additional_properties'].get('class', '')"]
+        federated: ["class_type == 'federated'"]
+  
   name:
     source_attribute: name # From the relation element
+    template: "{schema}_{table}" # Template for partition name
   source_type:
     default: m
+  m_code_generation:
+    api:
+      base_url: "${TABLEAU_TO_DAX_API_URL}" # Environment variable
+      timeout_seconds: 30
+      endpoints:
+        m_code: "/convert/tableau-to-m-code"
+    
+    # Connection type configurations
+    connection_types:
+      sqlserver:
+        class_type: "sqlserver"
+        required_attributes: [server, database, table]
+        optional_attributes: [schema]
+        fallback_template: |
+          let
+              Source = Sql.Database("{server}", "{database}"),
+              {schema}_{table} = Source{[Schema="{schema}",Item="{table}"]}
+          in
+              {schema}_{table}
+      
+      excel:
+        class_type: "excel-direct"
+        xpath:
+          connection: ".//named-connection//connection[@class='excel-direct']"
+        required_attributes: [filename]
+        optional_attributes: [sheet]
+        fallback_template: |
+          let
+              Source = Excel.Workbook(File.Contents("{filename}")),
+              {table} = Source{[Item="{table}"]}[Data]
+          in
+              {table}
+      
+      federated:
+        class_type: "federated"
+        xpath:
+          named_connection: ".//named-connection"
+    
+    # Connection info mapping
+    connection_info_mapping:
+      standard_fields:
+        class_type: class
+        server: server
+        database: dbname
+        schema: schema
+        table: [table, name] # Try table first, then name
+        filename: filename
+      computed_fields:
+        sql_query:
+          condition: "relation_node.get('type') == 'text'"
+          value: "relation_node.text"
+    
+    # M code formatting
+    formatting:
+      indentation:
+        base: 1
+        let_statement: 1
+        in_statement: 4
+        content: 5
+      html_unescape:
+        enabled: true
+        entities:
+          - "&quot;": '"'
+          - "&amp;": "&"
+          - "&lt;": "<"
+          - "&gt;": ">"
+          - "&#x27;": "'"
+    
+    # Error handling
+    error_handling:
+      log_errors: true
+      fallback_strategy: "template" # Options: template, empty, error
+      fallback_conditions:
+        sqlserver:
+          - "conn_info['class_type'] == 'sqlserver'"
+          - "conn_info['server']"
+          - "conn_info['database']"
+          - "conn_info['table']"
+    
+    # LLM Integration
+    llm:
+      enabled: true
+      prompt_template: |
+        Generate Power BI M code for the following Tableau connection:
+        Connection Type: {class_type}
+        {connection_details}
+        
+        Rules:
+        1. Use only valid Power BI M code syntax
+        2. Include proper error handling where appropriate
+        3. Follow Power BI best practices for data source connections
+        4. Return only the M code, no explanations
+        5. Use proper variable names and formatting
+        6. For Excel files, use Excel.Workbook and specify the table name in Item
+        7. For federated connections to Excel, use the Excel.Workbook function
+      
+      context_attributes:
+        - class_type
+        - server
+        - database
+        - schema
+        - table
+        - sql_query
+        - filename
+        - connection_type
+  
   expression: # M Code
     derived_rule: generate_m_code # Complex function using connection/relation info
     source_connection_xpath: ../connection
